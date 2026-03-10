@@ -95,13 +95,29 @@ pip install -r requirements.txt
 
 ### 4. Ingest the dataset
 
-Run once to create the table, generate OpenAI embeddings for every row, and insert them:
+Run once to create the table, generate OpenAI embeddings for every row, insert them, and build the vector index:
 
 ```bash
 python api/ingest.py
 ```
 
 > This may take a few minutes depending on dataset size, as it calls the OpenAI Embeddings API for each record.
+
+The ingestion pipeline does the following in order:
+
+1. **Creates the table** — `chronic_disease_indicators` with a `vector(1536)` column for embeddings.
+2. **Generates embeddings** — rows are processed in batches of 100 using `text-embedding-3-small` (1 536-dimension vectors).
+3. **Inserts rows** — each batch is committed to PostgreSQL incrementally.
+4. **Builds the HNSW index** — after all rows are inserted, an approximate nearest-neighbour index is created:
+
+```sql
+CREATE INDEX ON chronic_disease_indicators
+USING hnsw (embedding vector_cosine_ops);
+```
+
+**Why HNSW?** The Hierarchical Navigable Small World index trades a tiny amount of recall for dramatically faster similarity searches at query time. Without it, every vector search would do a full table scan (`O(n)`). With it, queries are sub-linear (`O(log n)`), which matters as the dataset grows.
+
+**`vector_cosine_ops`** tells pgvector to optimise for cosine distance (`<=>`), which is what the `vector_search_chronic_diseases` tool uses.
 
 ### 5. Run the agent
 
