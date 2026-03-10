@@ -1,0 +1,12 @@
+dotenv
+pandas 
+psycopg2-binary 
+pgvector 
+openai
+langchain
+langchain-openai 
+langgraph 
+psycopg2-binary 
+numpy
+langchain-core
+load_dotenv
