@@ -148,3 +148,8 @@ User: Compare obesity rates between men and women in 2021.
 | Embeddings | OpenAI `text-embedding-3-small` |
 | Database driver | psycopg2 |
 | Infrastructure | Docker + pgvector/pgvector:pg17 |
+
+
+## 6. Vector space 2d image
+<img width="1440" height="739" alt="vectospace" src="https://github.com/user-attachments/assets/280cc9bc-89d3-4b81-8921-036733927358" />
+
