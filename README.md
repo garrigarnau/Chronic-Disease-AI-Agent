@@ -6,27 +6,63 @@ A conversational AI assistant that lets you query the **U.S. Chronic Disease Ind
 
 ## How It Works
 
+The agent follows a **two-step pattern** that separates semantic concept discovery from precise structured retrieval:
+
 ```
 User prompt
      │
      ▼
-┌─────────────┐     tool call?     ┌──────────────────────────┐
-│  GPT-4o     │ ──────────────────▶│  query_db_metadata        │  SQL → PostgreSQL
-│  (LangGraph │                    │  vector_search_chronic_   │  pgvector similarity
-│   agent)    │ ◀──────────────────│  diseases                 │
-└─────────────┘     tool result    └──────────────────────────┘
-     │
-     ▼
- Final answer
+┌──────────────────────────────────────────────────────────────┐
+│  GPT-4o  (LangGraph orchestrator)                            │
+│  Decides which tool(s) to call based on the question         │
+└───────────────┬──────────────────────────────────────────────┘
+                │
+        ┌───────┴────────┐
+        │                │
+        ▼                ▼
+  Step 1 (optional)   Step 2 (always when filters exist)
+  vector_search       query_db_metadata
+  ─────────────       ─────────────────
+  Embeds query        Runs exact SQL with
+  → top-50 similar    WHERE filters (year,
+    rows (scoped by   location, topic names
+    year/location     discovered in Step 1)
+    if provided)           │
+        │                  │
+        ▼                  ▼
+  Discovered          Raw rows → pd.DataFrame
+  topic & question    │
+  names               ▼
+        │         gpt-4o-mini decides groupby spec
+        │         (JSON: groupby, agg_col, agg_funcs)
+        │             │
+        │             ▼
+        │         pandas .groupby().agg()
+        │         always groups by data_value_unit
+        │         and data_value_type to avoid
+        │         mixing incompatible metrics
+        │             │
+        └──────────┬──┘
+                   ▼
+     Compact aggregated table (~10–50 rows)
+                   │
+                   ▼
+┌──────────────────────────────────────────────────────────────┐
+│  GPT-4o writes final natural language answer                 │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-1. The user types a question in the CLI.
-2. The **LangGraph orchestrator** (`agents/orchestrator.py`) passes the conversation to GPT-4o.
-3. The model decides which tool to call (or answers directly):
-   - **`query_db_metadata`** — runs a SQL query for precise stats, counts, or averages.
-   - **`vector_search_chronic_diseases`** — embeds the query and finds semantically similar records via pgvector.
-4. Tool results are fed back to the model, which synthesises a final response.
-5. The conversation history is preserved for multi-turn dialogue.
+**When each tool is used:**
+
+| Question type | Tool(s) called |
+|--------------|---------------|
+| Vague concept, no filters | `vector_search` only |
+| Vague concept + year/location | `vector_search` → `query_db_metadata` |
+| Precise topic/column + filters | `query_db_metadata` only |
+
+**Why two steps?** The database stores exact disease names like `"Asthma"` and `"Chronic Obstructive Pulmonary Disease"`, not natural language terms like `"respiratory issues"`. Vector search bridges this gap — it finds the real column values, which SQL then uses for precise filtering.
+
+**Raw data never enters the context window.** The pandas aggregation step collapses potentially thousands of SQL rows into a compact table before GPT-4o sees the results.
 
 ---
 

@@ -1,13 +1,18 @@
 import pandas as pd
 import psycopg2
+import sys
+from pathlib import Path
+
 from pgvector.psycopg2 import register_vector
 from openai import OpenAI
 import os
 import numpy as np
 from dotenv import load_dotenv
 
+# Ensure the project root is on the path so sibling packages resolve
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-load_dotenv(path="../config/.env")
+load_dotenv(Path(__file__).resolve().parent.parent / "config" / ".env")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # 1. Database Configuration
@@ -68,7 +73,7 @@ conn.commit()
 BATCH_SIZE = 100  # Adjust based on speed/rate limits
 
 # Processing only a sample or the full set (remove .head() for full ingestion)
-df_to_process = df.head(1000).copy() 
+df_to_process = df.head(10000).copy() 
 
 for i in range(0, len(df_to_process), BATCH_SIZE):
     batch = df_to_process.iloc[i:i+BATCH_SIZE]
