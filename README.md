@@ -157,7 +157,6 @@ User question
 │   └── U.S._Chronic_Disease_Indicators.csv  # Source dataset (CDC)
 ├── config/
 │   └── .env                # Secret credentials (not committed)
-├── docker-compose.yml      # PostgreSQL + pgvector container
 └── requirements.txt
 ```
 
