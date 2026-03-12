@@ -6,61 +6,127 @@ A conversational AI assistant that lets you query the **U.S. Chronic Disease Ind
 
 ## How It Works
 
-The agent follows a **two-step pattern** that separates semantic concept discovery from precise structured retrieval:
+The agent uses a **two-step pattern** separating semantic concept discovery from precise structured retrieval. Steps are chained or skipped depending on the question.
 
 ```
-User prompt
-     │
-     ▼
-┌──────────────────────────────────────────────────────────────┐
-│  GPT-4o  (LangGraph orchestrator)                            │
-│  Decides which tool(s) to call based on the question         │
-└───────────────┬──────────────────────────────────────────────┘
-                │
-        ┌───────┴────────┐
-        │                │
-        ▼                ▼
-  Step 1 (optional)   Step 2 (always when filters exist)
-  vector_search       query_db_metadata
-  ─────────────       ─────────────────
-  Embeds query        Runs exact SQL with
-  → top-50 similar    WHERE filters (year,
-    rows (scoped by   location, topic names
-    year/location     discovered in Step 1)
-    if provided)           │
-        │                  │
-        ▼                  ▼
-  Discovered          Raw rows → pd.DataFrame
-  topic & question    │
-  names               ▼
-        │         gpt-4o-mini decides groupby spec
-        │         (JSON: groupby, agg_col, agg_funcs)
-        │             │
-        │             ▼
-        │         pandas .groupby().agg()
-        │         always groups by data_value_unit
-        │         and data_value_type to avoid
-        │         mixing incompatible metrics
-        │             │
-        └──────────┬──┘
-                   ▼
-     Compact aggregated table (~10–50 rows)
-                   │
-                   ▼
-┌──────────────────────────────────────────────────────────────┐
-│  GPT-4o writes final natural language answer                 │
-└──────────────────────────────────────────────────────────────┘
+User question
+      │
+      ▼
+┌─────────────────────────────────────────┐
+│  GPT-4o  (LangGraph orchestrator)       │
+│                                         │
+│  Is the concept vague / not a column    │
+│  value?  (e.g. "respiratory issues")    │
+└──────────┬──────────────────────────────┘
+           │
+     ┌─────┴──────┐
+     YES          NO (exact topic known)
+     │             │
+     ▼             │
+┌──────────────┐   │
+│  STEP 1      │   │
+│  vector_     │   │
+│  search      │   │
+│              │   │
+│  Embeds the  │   │
+│  query with  │   │
+│  optional    │   │
+│  year/loc    │   │
+│  filters     │   │
+│              │   │
+│  pgvector    │   │
+│  top-50 rows │   │
+│  by cosine   │   │
+│  similarity  │   │
+│              │   │
+│  → Discovers │   │
+│    exact DB  │   │
+│    topic &   │   │
+│    question  │   │
+│    names     │   │
+└──────┬───────┘   │
+       │           │
+       │  Does the question have     
+       │  structured filters?        
+       │  (year / location /         
+       │   demographic)              
+       │                             
+  ┌────┴──────┐                      
+  YES         NO                     
+  │           │                      
+  │           ▼                      
+  │    ┌────────────────┐            
+  │    │  Return        │            
+  │    │  discovered    │            
+  │    │  topics as     │            ◀── final tool result
+  │    │  answer        │
+  │    └────────────────┘
+  │
+  ▼
+┌──────────────────────────────────┐
+│  STEP 2  (always when filters    │
+│  exist, or question is precise)  │
+│  query_db_metadata               │
+│                                  │
+│  SQL with no LIMIT:              │
+│  WHERE topic IN (discovered)     │◀── topic names from Step 1,
+│    AND year_start = ?            │    or known directly
+│    AND location_desc = ?         │
+│    AND stratification = ?        │
+│                                  │
+│  → All matching rows loaded      │
+│    into pandas DataFrame         │
+└────────────────┬─────────────────┘
+                 │
+                 ▼
+        ┌─────────────────┐
+        │  gpt-4o-mini    │
+        │                 │
+        │  Sees:          │
+        │  question +     │
+        │  column names + │
+        │  3 sample rows  │
+        │                 │
+        │  → JSON spec:   │
+        │  { groupby,     │
+        │    agg_col,     │
+        │    agg_funcs }  │
+        └────────┬────────┘
+                 │
+                 ▼
+        ┌─────────────────┐
+        │  pandas         │
+        │  .groupby()     │
+        │  .agg()         │
+        │                 │
+        │  Always splits  │
+        │  by:            │
+        │  data_value_    │
+        │  unit +         │
+        │  data_value_    │
+        │  type           │
+        │                 │
+        │  → compact      │
+        │  table          │
+        │  (10–50 rows)   │
+        └────────┬────────┘
+                 │
+                 ▼
+┌─────────────────────────────────────────┐
+│  GPT-4o reads compact table             │
+│  → writes final natural language answer │
+└─────────────────────────────────────────┘
 ```
 
 **When each tool is used:**
 
-| Question type | Tool(s) called |
-|--------------|---------------|
-| Vague concept, no filters | `vector_search` only |
-| Vague concept + year/location | `vector_search` → `query_db_metadata` |
-| Precise topic/column + filters | `query_db_metadata` only |
+| Question type | Tools called | Why |
+|--------------|--------------|-----|
+| Vague concept, no filters | `vector_search` only | Concept discovery is enough |
+| Vague concept + year/location | `vector_search` → `query_db_metadata` | Discover names, then filter precisely |
+| Precise topic + filters | `query_db_metadata` only | Topic already known, SQL is sufficient |
 
-**Why two steps?** The database stores exact disease names like `"Asthma"` and `"Chronic Obstructive Pulmonary Disease"`, not natural language terms like `"respiratory issues"`. Vector search bridges this gap — it finds the real column values, which SQL then uses for precise filtering.
+**Why two steps?** The database stores exact names like `"Asthma"` and `"Chronic Obstructive Pulmonary Disease"`, not natural language terms like `"respiratory issues"`. Vector search bridges this gap — it translates the user's language into the real column values that SQL can filter on.
 
 **Raw data never enters the context window.** The pandas aggregation step collapses potentially thousands of SQL rows into a compact table before GPT-4o sees the results.
 
@@ -71,21 +137,27 @@ User prompt
 ```
 .
 ├── api/
-│   ├── app.py          # CLI entry point — runs the conversational agent loop
-│   ├── ingest.py       # One-time script: loads CSV, generates embeddings, inserts into DB
-│   └── search.py       # Standalone vector search utility / smoke-test
+│   ├── app.py              # CLI entry point — runs the conversational agent loop
+│   ├── ingest.py           # One-time script: loads CSV, generates embeddings, inserts into DB
+│   ├── plot_embeddings.py  # Generates a 2D UMAP scatter plot of the embedding space
+│   └── search.py           # Standalone vector search utility / smoke-test
 ├── agents/
-│   ├── orchestrator.py # LangGraph StateGraph — the agent brain
+│   ├── __init__.py         # Re-exports `app` from orchestrator
+│   ├── orchestrator.py     # LangGraph StateGraph — the agent brain
 │   └── tools/
-│       ├── sql_search.py     # query_db_metadata tool
-│       └── vector_search.py  # vector_search_chronic_diseases tool
+│       ├── __init__.py          # Re-exports both tool functions
+│       ├── sql_search.py        # query_db_metadata tool (SQL + pandas aggregation)
+│       └── vector_search.py     # vector_search_chronic_diseases tool (pgvector + pandas)
 ├── database/
-│   └── connection.py   # Shared DB connection, cursor, and embedding model
+│   ├── __init__.py         # Re-exports conn, cur, embedding_model
+│   └── connection.py       # Shared DB connection, cursor, and embedding model
+├── deployment/
+│   └── docker-compose.yml  # PostgreSQL + pgvector container
 ├── data/
 │   └── U.S._Chronic_Disease_Indicators.csv  # Source dataset (CDC)
 ├── config/
-│   └── .env            # Secret credentials (not committed)
-├── docker-compose.yml  # PostgreSQL + pgvector container
+│   └── .env                # Secret credentials (not committed)
+├── docker-compose.yml      # PostgreSQL + pgvector container
 └── requirements.txt
 ```
 
@@ -166,6 +238,7 @@ python api/app.py
 ## Example Queries
 
 ```
+User: What data do we have on respiratory health issues in Colorado 2021?
 User: What is the average diabetes prevalence in California?
 User: Which states have the highest cardiovascular disease rates?
 User: Tell me about alcohol-related chronic disease indicators.
@@ -174,14 +247,29 @@ User: Compare obesity rates between men and women in 2021.
 
 ---
 
+## Visualising the Embedding Space
+
+Generate a 2D UMAP projection of the database embeddings coloured by disease topic:
+
+```bash
+pip install umap-learn matplotlib
+python api/plot_embeddings.py              # default: 1 000 rows
+python api/plot_embeddings.py --limit 3000 --output my_plot.png
+```
+
+---
+
 ## Key Technologies
 
 | Component | Technology |
 |-----------|-----------|
-| LLM | OpenAI GPT-4o |
+| LLM (reasoning) | OpenAI GPT-4o |
+| LLM (aggregation spec) | OpenAI GPT-4o-mini |
 | Agent framework | LangGraph |
 | Vector search | pgvector (PostgreSQL extension) |
 | Embeddings | OpenAI `text-embedding-3-small` |
+| Data aggregation | pandas |
+| Dimensionality reduction | UMAP |
 | Database driver | psycopg2 |
 | Infrastructure | Docker + pgvector/pgvector:pg17 |
 
